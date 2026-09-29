@@ -129,9 +129,10 @@ generic plan, `DEALLOCATE` and prepare the statement again. A newly planned
 query can choose the correct sequential fallback, while the cached plan is
 rejected to avoid incorrect index results.
 
-Boolean filtering and BM25 ranking are separate scan modes. A query combining
-`WHERE content @@ ...` with `ORDER BY content <@> ...` cannot use one BM25
-index scan for both operations.
+Combining Boolean filtering with BM25 ranking is supported, but is not yet
+optimized as a single index scan. PostgreSQL currently evaluates the filter,
+calculates standalone scores for the matching rows, and then sorts them. This
+is most effective when the Boolean filter matches relatively few rows.
 
 ### Verifying Index Usage
 
@@ -360,16 +361,26 @@ REINDEX INDEX docs_idx;
 ### Compaction
 
 With the default `inline` policy, compaction of levels that reach the configured
-threshold occurs as part of the write transaction that triggers the spill. It is
-skipped, and left to the next spill, when another session is using or maintaining
-the index. These functions provide manual and scheduled control; each raises
-`lock_not_available` rather than waiting for either maintenance admission or
-exclusive index access:
+threshold occurs synchronously in the write transaction that triggers the
+spill. Readers and other memtable writers can continue while merged output is
+built, because the long build holds no per-index LWLock. This is reader
+non-blocking, not foreground-writer non-blocking: the invoking writer still
+spends the time required to build and publish the merge. Compaction is
+skipped, and left to the next spill, when another session is reindexing,
+vacuuming, or compacting the index.
+
+These functions provide manual and scheduled control. They wait when another
+session holds index maintenance:
 
 ```sql
 SELECT bm25_force_merge('docs_idx');
 SELECT bm25_compact('docs_idx'::regclass);
 SELECT bm25_compact_step('docs_idx'::regclass);
+```
+
+These report compaction state without waiting for maintenance:
+
+```sql
 SELECT bm25_needs_compaction('docs_idx'::regclass);
 SELECT bm25_level_counts('docs_idx'::regclass);
 ```
@@ -381,8 +392,8 @@ processes at most one pass.
 
 - Long merge work checks for cancellation, but published replacements remain
   physical and are not undone by `ROLLBACK`.
-- Drive maintenance loops from `bm25_compact_step()`'s return value, not
-  `bm25_needs_compaction()`, which is advisory.
+- `bm25_needs_compaction()` reports whether `bm25_compact_step()` would run a
+  pass, so either can drive a maintenance loop.
 - Mutating functions require index ownership and do not operate on partitioned
   parent indexes or during recovery.
 
@@ -390,7 +401,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md#spill-and-compaction) for sizing,
 publication, locking, and page-reclaim details.
 
 Hot standbys serving queries must set `hot_standby_feedback = on` so active
-snapshots delay physical page reuse on the primary.
+snapshots delay physical page reuse on the primary. If a standby disconnects
+while an old snapshot remains active, stock PostgreSQL recovery-conflict WAL
+cancels that snapshot before reclaimed segment pages can be reused on replay.
 
 ### Settings
 
@@ -495,6 +508,10 @@ owner's identity. The compaction SQL nodes reached through either a spill
 signal or the cron backstop execute in pg_durable connections authenticated as
 the index owner, not as the DML writer; pg_durable's worker role provides only
 the orchestration infrastructure.
+
+pg_durable must be installed in the same database as the BM25 index.
+Use `manual` compaction for indexes outside `pg_durable.database`.
+This restriction is expected to be lifted in a future version of pg_durable.
 
 ```sql
 CREATE INDEX documents_bm25 ON documents USING bm25(content)

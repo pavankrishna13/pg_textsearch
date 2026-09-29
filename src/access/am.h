@@ -100,7 +100,7 @@ PGDLLEXPORT Datum tp_handler(PG_FUNCTION_ARGS);
 /* Link a segment as the new L0 chain head in the metapage */
 void tp_link_l0_chain_head(Relation index, BlockNumber segment_root);
 
-/* Truncate dead pages by walking segment chains for max used block */
+/* Truncate a contiguous EOF suffix already stamped recyclable */
 void tp_truncate_dead_pages(Relation index);
 
 /*
@@ -151,6 +151,7 @@ int tp_tokenize_text(
 		int	   *term_count_out);
 
 /* Build progress tracking for partitioned tables */
+void tp_build_progress_set_owner(const void *owner);
 void tp_build_progress_begin(void);
 void tp_build_progress_end(void);
 void tp_build_progress_abort(void);
@@ -187,14 +188,17 @@ char *tp_buildphasename(int64 phase);
  */
 void tp_spill_memtable_if_needed(
 		Relation index, TpLocalIndexState *index_state, uint32 min_pages);
-
 /*
- * Spill with an empty chain as the postcondition, for callers whose
- * correctness depends on it.  A level 0 with no room reports its
- * capacity limit instead of leaving records in the chain.
+ * Spill now but let the caller apply compaction after prerequisite work.
+ * An empty chain is the postcondition, for callers whose correctness
+ * depends on it: a level 0 with no room reports its capacity limit
+ * instead of leaving records in the chain.  Returns whether a spill ran.
  */
-void tp_spill_memtable_required(
+bool tp_spill_memtable_if_needed_deferred(
 		Relation index, TpLocalIndexState *index_state, uint32 min_pages);
+/* Apply the index policy after a caller-deferred spill. */
+void tp_apply_compaction_policy(
+		TpLocalIndexState *index_state, Relation index_rel, bool spilled);
 
 /* Shutdown cleanup spills durable state without starting maintenance. */
 void tp_spill_memtable_without_compaction_if_needed(
@@ -204,9 +208,11 @@ void tp_spill_memtable_without_compaction_if_needed(
  * Recycle memtable pages stamped DEAD during spill: scan the index
  * main fork, tp_record_free_index_page when dead_fxid is older than
  * the global visibility horizon for heaprel.  Returns the number of
- * blocks freed.  Caller must hold per-index LW_SHARED or stronger
- * (tp_vacuumcleanup).  Each freed page is WAL-stamped recyclable
- * before it returns to the FSM (same as segment page free).
+ * blocks freed.  Caller must hold the per-index maintenance object
+ * lock to exclude force-merge truncation, but must not retain the
+ * per-index LWLock across this full-fork scan.  Each freed page is
+ * WAL-stamped recyclable before it returns to the FSM (same as
+ * segment page free).
  */
 int tp_reclaim_dead_memtable_pages(Relation indexrel, Relation heaprel);
 
@@ -217,21 +223,6 @@ int tp_reclaim_dead_memtable_pages(Relation indexrel, Relation heaprel);
  * horizon — NULL can only over-retain, never free too early.
  */
 extern FullTransactionId tp_reclaim_horizon(Relation heaprel);
-
-/*
- * Spill the current index's memtable to a disk segment.
- * Returns true if a segment was written or chain stats were applied.
- * If `out_segment_root` is non-NULL and a segment was emitted (not
- * solely a doc-length update), it receives the BlockNumber of the
- * new L0 segment header *before* any subsequent L0->L1 compaction;
- * otherwise it is set to InvalidBlockNumber.
- *
- * Caller must already hold LW_EXCLUSIVE on the per-index lock.
- */
-bool tp_do_spill(
-		TpLocalIndexState *index_state,
-		Relation		   index_rel,
-		BlockNumber		  *out_segment_root);
 
 /*
  * Handler functions (am/handler.c)
