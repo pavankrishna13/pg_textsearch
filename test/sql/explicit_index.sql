@@ -41,6 +41,8 @@ SELECT 'hello' <@> to_bm25query('postgres', 'content_idx') AS score;
 CREATE INDEX title_btree_idx ON explicit_index_test (title);
 SELECT to_bm25query('postgres', 'title_btree_idx');
 SELECT to_bm25query('postgres', 'explicit_index_test');
+SELECT 'title_btree_idx:postgres'::bm25query;
+SELECT 'explicit_index_test:postgres'::bm25query;
 
 -- Clean up
 DROP TABLE explicit_index_test;

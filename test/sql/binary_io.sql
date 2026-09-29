@@ -11,13 +11,21 @@ INSERT INTO binary_io_docs (content) VALUES
 CREATE INDEX binary_io_idx ON binary_io_docs USING bm25(content)
     WITH (text_config='english');
 
+-- A partitioned parent index has a different relkind from a leaf index.
+CREATE TABLE binary_io_parent (id INT, content TEXT)
+    PARTITION BY RANGE (id);
+CREATE INDEX binary_io_parent_idx ON binary_io_parent USING bm25(content)
+    WITH (text_config='english');
+
 -- Create a table with bm25query column
 CREATE TABLE query_export (id SERIAL, q bm25query);
 
 -- Insert some queries
 INSERT INTO query_export (q) VALUES
     (to_bm25query('hello world', 'binary_io_idx')),
-    (to_bm25query('database search', 'binary_io_idx'));
+    (to_bm25query('database search', 'binary_io_idx')),
+    (to_bm25query('hello')),
+    (to_bm25query('hello', 'binary_io_parent_idx'));
 
 -- Show original data before COPY
 SELECT id, q::text AS original_query FROM query_export ORDER BY id;
@@ -91,4 +99,5 @@ DROP TABLE query_import;
 DROP TABLE vector_export;
 DROP TABLE vector_import;
 DROP TABLE binary_io_docs CASCADE;
+DROP TABLE binary_io_parent;
 DROP EXTENSION pg_textsearch CASCADE;
